@@ -30,17 +30,22 @@ def setup_database():
                         word1 TEXT,
                         word2 TEXT,
                         next_word TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         PRIMARY KEY (chat_id, word1, word2, next_word))''')
     conn.commit()
     conn.close()
 
 # Save message data to the database
+# Updated to include created_at and updated_at fields
 def save_to_database(chat_id, word_pairs):
     conn = sqlite3.connect('markov_data.db')
     cursor = conn.cursor()
     for word1, word2, next_word in word_pairs:
-        cursor.execute('''INSERT OR IGNORE INTO markov_data (chat_id, word1, word2, next_word)
-                          VALUES (?, ?, ?, ?)''', (chat_id, word1, word2, next_word))
+        cursor.execute('''INSERT OR IGNORE INTO markov_data (chat_id, word1, word2, next_word, created_at, updated_at)
+                          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)''', (chat_id, word1, word2, next_word))
+        cursor.execute('''UPDATE markov_data SET updated_at = CURRENT_TIMESTAMP
+                          WHERE chat_id = ? AND word1 = ? AND word2 = ? AND next_word = ?''', (chat_id, word1, word2, next_word))
     conn.commit()
     conn.close()
 
