@@ -126,16 +126,6 @@ async def send_random_message(context: ContextTypes.DEFAULT_TYPE):
     message = generate_message(chat_id)
     await context.bot.send_message(chat_id=chat_id, text=message)
 
-# Add a job to send random messages
-async def schedule_random_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    if not context.job_queue:
-        await update.message.reply_text("Job queue is not initialized. Please try again later.")
-        return
-
-    context.job_queue.run_repeating(send_random_message, interval=random.randint(3600, 7200), first=10, chat_id=chat_id)
-    await update.message.reply_text('I will now send random messages to this group!')
-
 # Add a command to request a new message
 async def request_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -146,7 +136,6 @@ async def request_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def set_bot_commands(application):
     commands = [
         BotCommand("start", "Start the bot and get a welcome message"),
-        # BotCommand("schedule", "Schedule random messages in the group"),
         BotCommand("request", "Request a generated message from the bot")
     ]
     application.bot.set_my_commands(commands, scope=None)  # Default scope for all users
@@ -163,7 +152,6 @@ def main():
     set_bot_commands(application)
 
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('schedule', schedule_random_messages))
     application.add_handler(CommandHandler('request', request_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

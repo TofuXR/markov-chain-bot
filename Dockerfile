@@ -1,4 +1,5 @@
-FROM python:3.9-slim
+# Update the Python version to 3.11.6
+FROM python:3.11.6-slim
 
 # Set the working directory in the container
 WORKDIR /app
