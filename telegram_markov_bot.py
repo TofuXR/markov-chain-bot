@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 from telegram import Update, BotCommand, BotCommandScopeAllGroupChats
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from collections import defaultdict
 
 # Load environment variables
 load_dotenv()
@@ -43,8 +44,8 @@ def save_to_database(chat_id, word_pairs):
     conn.commit()
     conn.close()
 
-# Generate a message using Markov chains
-def generate_message(chat_id):
+# Updated function to build the Markov model
+def build_markov_model(chat_id):
     conn = sqlite3.connect('markov_data.db')
     cursor = conn.cursor()
     cursor.execute('SELECT word1, word2, next_word FROM markov_data WHERE chat_id = ?', (chat_id,))
@@ -52,21 +53,43 @@ def generate_message(chat_id):
     conn.close()
 
     if not data:
+        return None, None
+
+    transitions = defaultdict(lambda: defaultdict(int))
+    starting_states = []
+
+    for word1, word2, next_word in data:
+        if word1 == '<START>':
+            starting_states.append((word1, word2))
+        transitions[(word1, word2)][next_word] += 1
+
+    return transitions, starting_states
+
+# Updated function to generate a message
+def generate_message(chat_id, max_length=20):
+    transitions, starting_states = build_markov_model(chat_id)
+
+    if not starting_states:
         return "I don't have enough data to generate a message yet!"
 
-    markov_dict = {}
-    for word1, word2, next_word in data:
-        markov_dict.setdefault((word1, word2), []).append(next_word)
+    current_state = random.choice(starting_states)
+    message = [current_state[1]]
 
-    start_pair = random.choice(list(markov_dict.keys()))
-    message = [start_pair[0], start_pair[1]]
-
-    while len(message) < 50:  # Limit message length
-        pair = (message[-2], message[-1])
-        if pair not in markov_dict:
+    while len(message) < max_length:
+        next_words = transitions[current_state]
+        if not next_words:
             break
-        next_word = random.choice(markov_dict[pair])
+
+        words, counts = zip(*next_words.items())
+        total = sum(counts)
+        probabilities = [count / total for count in counts]
+        next_word = random.choices(words, weights=probabilities, k=1)[0]
+
+        if next_word == '<END>':
+            break
+
         message.append(next_word)
+        current_state = (current_state[1], next_word)
 
     return ' '.join(message)
 
@@ -74,23 +97,19 @@ def generate_message(chat_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Hello! I am a Markov Chain Bot. Add me to a group and I will learn from the messages!')
 
-# Handle incoming messages
+# Updated message handler to preprocess incoming messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     text = update.message.text
-    words = text.split()
+    words = text.lower().split()
 
-    # Log every message received
     logger.info(f"Received message in chat {chat_id}: {text}")
 
-    # Log when a message is ignored
-    if not text:
-        logger.debug(f"Ignored a non-text message in chat {chat_id}.")
+    if not text or len(words) < 2:
+        logger.debug(f"Ignored a non-text or too short message in chat {chat_id}.")
         return
 
-    if len(words) < 3:
-        return
-
+    words = ['<START>'] + words + ['<END>']
     word_pairs = [(words[i], words[i + 1], words[i + 2]) for i in range(len(words) - 2)]
     save_to_database(chat_id, word_pairs)
 
