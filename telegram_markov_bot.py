@@ -11,10 +11,11 @@ from collections import defaultdict
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Ensure logging is set to debug level for more detailed output
+# Update logging level based on environment variable
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=getattr(logging, LOG_LEVEL, logging.INFO)
 )
 logger = logging.getLogger(__name__)
 
