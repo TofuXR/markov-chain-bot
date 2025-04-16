@@ -3,9 +3,10 @@ import random
 import sqlite3
 import os
 from dotenv import load_dotenv
-from telegram import Update, BotCommand, BotCommandScopeAllGroupChats
+from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from collections import defaultdict
+import string
 
 # Load environment variables
 load_dotenv()
@@ -108,14 +109,28 @@ def generate_message(chat_id, max_length=20):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Hello! I am a Markov Chain Bot. Add me to a group and I will learn from the messages!')
 
-# Updated message handler to preprocess incoming messages
+# Updated message handler to respond to replies to the bot's messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     text = update.message.text
-    words = text.lower().split()
+    words = [word.strip(string.punctuation).lower() for word in text.split()]
 
     logger.info(f"Received message in chat {chat_id}: {text}")
 
+    # Check if the bot is mentioned
+    if 'marky' in words or 'марки' in words:
+        logger.info(f"Bot was mentioned in chat {chat_id}. Generating a response.")
+        message = generate_message(chat_id)
+        await update.message.reply_text(message)
+        return
+
+    # Check if the message is a reply to the bot's message
+    if update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id:
+        logger.info(f"Message is a reply to the bot in chat {chat_id}. Generating a response.")
+        message = generate_message(chat_id)
+        await update.message.reply_text(message)
+        return
+    
     if not text or len(words) < 2:
         logger.debug(f"Ignored a non-text or too short message in chat {chat_id}.")
         return
@@ -145,16 +160,14 @@ def set_bot_commands(application):
     ]
     application.bot.set_my_commands(commands, scope=None)  # Default scope for all users
 
-    # Add commands specifically for group chats
-    group_scope = BotCommandScopeAllGroupChats()
-    application.bot.set_my_commands(commands, scope=group_scope)
+    # Removed group chat-specific commands
 
 # Main function to run the bot
 def main():
     setup_database()
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    set_bot_commands(application)
+    # set_bot_commands(application)
 
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('request', request_message))
