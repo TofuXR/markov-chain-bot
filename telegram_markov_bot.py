@@ -51,6 +51,8 @@ def save_to_database(chat_id, word_pairs):
         conn.commit()
     except sqlite3.DatabaseError as e:
         logger.error(f"Database error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error while saving: {e}")
     finally:
         conn.close()
 
@@ -132,7 +134,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if not text or len(words) < 2:
-        logger.debug(f"Ignored a non-text or too short message in chat {chat_id}.")
+        logger.info(f"Ignored a non-text or too short message in chat {chat_id}.")
         return
 
     words = ['<START>'] + words + ['<END>']
