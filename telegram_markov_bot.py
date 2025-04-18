@@ -119,27 +119,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Received message in chat {chat_id}: {text}")
 
-    # Check if the bot is mentioned
-    if 'marky' in words or 'марки' in words:
+    # Check if the bot is mentioned using substring matching
+    if any(keyword in text.lower() for keyword in ['marky', 'марки']):
         logger.info(f"Bot was mentioned in chat {chat_id}. Generating a response.")
         message = generate_message(chat_id)
         await update.message.reply_text(message)
-        return
+
+    # Save message data regardless of bot mention
+    if text and len(words) >= 2:
+        words = ['<START>'] + words + ['<END>']
+        word_pairs = [(words[i], words[i + 1], words[i + 2]) for i in range(len(words) - 2)]
+        save_to_database(chat_id, word_pairs)
 
     # Check if the message is a reply to the bot's message
     if update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id:
         logger.info(f"Message is a reply to the bot in chat {chat_id}. Generating a response.")
         message = generate_message(chat_id)
         await update.message.reply_text(message)
-        return
-    
-    if not text or len(words) < 2:
-        logger.info(f"Ignored a non-text or too short message in chat {chat_id}.")
-        return
-
-    words = ['<START>'] + words + ['<END>']
-    word_pairs = [(words[i], words[i + 1], words[i + 2]) for i in range(len(words) - 2)]
-    save_to_database(chat_id, word_pairs)
 
 # Send a random message to the group
 async def send_random_message(context: ContextTypes.DEFAULT_TYPE):
