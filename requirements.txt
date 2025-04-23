@@ -1,4 +1,3 @@
 python-telegram-bot==20.3
 python-dotenv==1.0.0
 requests==2.31.0
-sqlite3-adapter==0.0.5
