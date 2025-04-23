@@ -2,6 +2,7 @@ import logging
 import random
 import sqlite3
 import os
+import time
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -28,6 +29,15 @@ MARKOV_ORDER = int(os.getenv('MARKOV_ORDER', 2))
 
 # Load the bot owner's ID from environment variables
 BOT_OWNER_ID = int(os.getenv('BOT_OWNER_ID', '0'))
+
+# Configuration for random replies and inactivity detection
+RANDOM_REPLY_CHANCE = float(os.getenv('RANDOM_REPLY_CHANCE', '0.05'))  # 5% chance to reply randomly
+INACTIVITY_CHECK_INTERVAL = int(os.getenv('INACTIVITY_CHECK_INTERVAL', '3600'))  # Check every hour
+INACTIVITY_THRESHOLD = int(os.getenv('INACTIVITY_THRESHOLD', '86400'))  # 24 hours of inactivity
+
+# Store the last message timestamp for each chat
+last_message_times = {}
+last_bot_message_times = {}
 
 # Database setup
 def setup_database():
@@ -62,6 +72,48 @@ def save_to_database(chat_id, word_pairs):
     finally:
         conn.close()
 
+# Check if a word exists in the database for a specific chat
+def word_exists_in_db(chat_id, word):
+    try:
+        conn = sqlite3.connect('markov_data.db')
+        cursor = conn.cursor()
+        
+        # Check if the word exists as word1 or word2
+        cursor.execute('''
+            SELECT COUNT(*) FROM markov_data 
+            WHERE chat_id = ? AND (word1 = ? OR word2 = ?)
+        ''', (chat_id, word, word))
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        logger.error(f"Error checking word existence: {e}")
+        return False
+
+# Get random words from the database for a specific chat
+def get_random_word_from_db(chat_id):
+    try:
+        conn = sqlite3.connect('markov_data.db')
+        cursor = conn.cursor()
+        
+        # Get a random word1 that's not a special token
+        cursor.execute('''
+            SELECT DISTINCT word1 FROM markov_data 
+            WHERE chat_id = ? AND word1 NOT IN ('<START>', '<END>')
+            ORDER BY RANDOM() LIMIT 1
+        ''', (chat_id,))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return result[0]
+        return None
+    except Exception as e:
+        logger.error(f"Error getting random word: {e}")
+        return None
+
 # Updated function to build the Markov model to support 1st order
 def build_markov_model(chat_id):
     conn = sqlite3.connect('markov_data.db')
@@ -93,8 +145,8 @@ def build_markov_model(chat_id):
 
     return transitions, starting_states
 
-# Updated function to generate a message to optionally use all chats' data
-def generate_message(chat_id, max_length=20, use_all_chats=False):
+# Enhanced message generation with optional starting word
+def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=None):
     if use_all_chats:
         chat_id = None  # Use None to indicate all chats
 
@@ -103,11 +155,64 @@ def generate_message(chat_id, max_length=20, use_all_chats=False):
     if not starting_states:
         return "I don't have enough data to generate a message yet!"
 
+    # Initialize message list that we'll build up
+    message = []
+    
     if MARKOV_ORDER == 1:
-        current_state = random.choice(starting_states)
-        message = [current_state]
+        if starting_word and starting_word in transitions:
+            # Use the provided starting word if it exists in the model
+            current_state = starting_word
+            message = [current_state]
+        else:
+            # Fall back to random starting state, but exclude <START> token
+            state = random.choice(starting_states)
+            # Make sure we don't add <START> to the actual message
+            if state != '<START>':
+                current_state = state
+                message = [current_state]
+            else:
+                # If we somehow get <START>, find another state
+                for state_key in transitions.keys():
+                    if state_key != '<START>' and state_key != '<END>':
+                        current_state = state_key
+                        message = [current_state]
+                        break
+    else:  # MARKOV_ORDER == 2
+        if starting_word:
+            # Find a valid starting state involving the starting word
+            valid_states = [state for state in starting_states if state[1] == starting_word]
+            if valid_states:
+                current_state = random.choice(valid_states)
+                # Only add the real word, not the <START> token
+                message = [current_state[1]]
+            else:
+                # Find any state with starting_word as first element
+                found = False
+                for state in transitions.keys():
+                    if isinstance(state, tuple) and state[0] != '<START>' and state[0] == starting_word:
+                        current_state = state
+                        message = [state[0], state[1]]  # Add both words
+                        found = True
+                        break
+                
+                if not found:
+                    # Fall back to random starting state
+                    current_state = random.choice(starting_states)
+                    # Only add the second word, as the first is likely <START>
+                    message = [current_state[1]]
+        else:
+            # Default behavior without starting word
+            current_state = random.choice(starting_states)
+            # Only add the second word, as the first is likely <START>
+            message = [current_state[1]]
 
+    # Generate the rest of the message
+    if MARKOV_ORDER == 1:
         while len(message) < max_length:
+            # Skip if current state is not in transitions or is a special token
+            if current_state not in transitions or current_state in ['<START>', '<END>']:
+                break
+                
             next_words = transitions[current_state]
             if not next_words:
                 break
@@ -119,14 +224,16 @@ def generate_message(chat_id, max_length=20, use_all_chats=False):
 
             if next_word == '<END>':
                 break
-
-            message.append(next_word)
+                
+            if next_word != '<START>':  # Make sure we don't add <START>
+                message.append(next_word)
+                
             current_state = next_word
-    else:
-        current_state = random.choice(starting_states)
-        message = [current_state[1]]
-
+    else:  # MARKOV_ORDER == 2
         while len(message) < max_length:
+            if current_state not in transitions:
+                break
+                
             next_words = transitions[current_state]
             if not next_words:
                 break
@@ -138,9 +245,20 @@ def generate_message(chat_id, max_length=20, use_all_chats=False):
 
             if next_word == '<END>':
                 break
-
-            message.append(next_word)
+                
+            if next_word != '<START>':  # Make sure we don't add <START>
+                message.append(next_word)
+                
             current_state = (current_state[1], next_word)
+
+    # Filter out any <START> tokens that might have slipped through
+    message = [word for word in message if word != '<START>' and word != '<END>']
+    
+    if not message:
+        # If somehow we ended up with an empty message, try again without a starting word
+        if starting_word:
+            return generate_message(chat_id, max_length, use_all_chats, None)
+        return "I don't have enough data to generate a coherent message yet!"
 
     generated_message = ' '.join(message)
     logger.info(f"Generated message: {generated_message}")
@@ -150,19 +268,23 @@ def generate_message(chat_id, max_length=20, use_all_chats=False):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Hello! I am a Markov Chain Bot. Add me to a group and I will learn from the messages!')
 
-# Updated message handler to respond to replies to the bot's messages
+# Enhanced message handler to respond to user messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     text = update.message.text
     words = [word.strip(string.punctuation).lower() for word in text.split()]
 
     logger.info(f"Received message in chat {chat_id}: {text}")
+    
+    # Update the last message time for this chat
+    last_message_times[chat_id] = time.time()
 
     # Check if the bot is mentioned using substring matching
     if any(keyword in text.lower() for keyword in ['marky', 'марки']):
         logger.info(f"Bot was mentioned in chat {chat_id}. Generating a response.")
         message = generate_message(chat_id)
         await update.message.reply_text(message)
+        last_bot_message_times[chat_id] = time.time()
 
     # Save message data regardless of bot mention
     if text and len(words) >= 2:
@@ -173,15 +295,71 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if the message is a reply to the bot's message
     if update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id:
         logger.info(f"Message is a reply to the bot in chat {chat_id}. Generating a response.")
-        message = generate_message(chat_id)
+        
+        # Try to use a word from the user's message as a starting point
+        valid_start_word = None
+        filtered_words = [w for w in words if w and len(w) > 2]  # Filter short words
+        
+        # Shuffle words to select a random one
+        random.shuffle(filtered_words)
+        
+        for word in filtered_words:
+            if word_exists_in_db(chat_id, word):
+                valid_start_word = word
+                break
+        
+        # Generate message with the starting word if found, otherwise normal generation
+        message = generate_message(chat_id, starting_word=valid_start_word)
         await update.message.reply_text(message)
+        last_bot_message_times[chat_id] = time.time()
+    
+    # Random chance to reply to a message
+    elif random.random() < RANDOM_REPLY_CHANCE:
+        logger.info(f"Randomly decided to reply in chat {chat_id}")
+        
+        # Try to use a word from the user's message as a starting point
+        valid_start_word = None
+        filtered_words = [w for w in words if w and len(w) > 2]  # Filter short words
+        
+        if filtered_words:
+            # Shuffle words to select a random one
+            random.shuffle(filtered_words)
+            
+            for word in filtered_words:
+                if word_exists_in_db(chat_id, word):
+                    valid_start_word = word
+                    break
+        
+        # Generate message with the starting word if found, otherwise normal generation
+        message = generate_message(chat_id, starting_word=valid_start_word)
+        await update.message.reply_text(message)
+        last_bot_message_times[chat_id] = time.time()
 
-# Send a random message to the group
-async def send_random_message(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    chat_id = job.chat_id
-    message = generate_message(chat_id)
-    await context.bot.send_message(chat_id=chat_id, text=message)
+# Check for inactive chats and respond if needed
+async def check_inactivity(context: ContextTypes.DEFAULT_TYPE):
+    current_time = time.time()
+    
+    for chat_id, last_time in last_message_times.items():
+        # Skip if we've recently sent a message to this chat
+        if chat_id in last_bot_message_times and current_time - last_bot_message_times.get(chat_id, 0) < INACTIVITY_THRESHOLD / 2:
+            continue
+            
+        # If chat has been inactive for longer than the threshold
+        if current_time - last_time > INACTIVITY_THRESHOLD:
+            logger.info(f"Detected inactivity in chat {chat_id}. Sending a message.")
+            
+            # Generate a random message for the inactive chat
+            random_word = get_random_word_from_db(chat_id)
+            message = generate_message(chat_id, starting_word=random_word)
+            
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=message)
+                last_bot_message_times[chat_id] = current_time
+                
+                # Reset inactivity timer to avoid spamming
+                last_message_times[chat_id] = current_time
+            except Exception as e:
+                logger.error(f"Failed to send inactivity message to chat {chat_id}: {e}")
 
 # Updated request_message command to restrict to the bot owner's DM
 async def request_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -203,8 +381,6 @@ def set_bot_commands(application):
     ]
     application.bot.set_my_commands(commands, scope=None)  # Default scope for all users
 
-    # Removed group chat-specific commands
-
 # Main function to run the bot
 def main():
     setup_database()
@@ -215,6 +391,10 @@ def main():
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('request', request_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Add the job to check for inactivity
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_inactivity, interval=INACTIVITY_CHECK_INTERVAL, first=INACTIVITY_CHECK_INTERVAL)
 
     # Log when the bot starts polling
     logger.info("Bot has started polling for updates.")

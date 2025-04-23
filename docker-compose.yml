@@ -6,6 +6,12 @@ services:
     container_name: markov-chain-bot
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - BOT_OWNER_ID=${BOT_OWNER_ID:-0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MARKOV_ORDER=${MARKOV_ORDER:-2}
+      - RANDOM_REPLY_CHANCE=${RANDOM_REPLY_CHANCE:-0.05}
+      - INACTIVITY_CHECK_INTERVAL=${INACTIVITY_CHECK_INTERVAL:-3600}
+      - INACTIVITY_THRESHOLD=${INACTIVITY_THRESHOLD:-86400}
     volumes:
       - ./markov_data.db:/app/markov_data.db
     ports:

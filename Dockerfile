@@ -13,8 +13,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Make port 8080 available to the world outside this container
 EXPOSE 8080
 
-# Define environment variable
+# Define environment variables
 ENV BOT_TOKEN=""
+ENV BOT_OWNER_ID="0"
+ENV LOG_LEVEL="INFO"
+ENV MARKOV_ORDER="1"
+ENV RANDOM_REPLY_CHANCE="0.05"
+ENV INACTIVITY_CHECK_INTERVAL="3600"
+ENV INACTIVITY_THRESHOLD="86400"
 
 # Run the application
 CMD ["python", "telegram_markov_bot.py"]
