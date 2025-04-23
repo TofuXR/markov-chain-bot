@@ -26,6 +26,9 @@ logger.debug("Bot is running and ready to process messages.")
 # Add a new environment variable to control Markov order
 MARKOV_ORDER = int(os.getenv('MARKOV_ORDER', 2))
 
+# Load the bot owner's ID from environment variables
+BOT_OWNER_ID = int(os.getenv('BOT_OWNER_ID', '0'))
+
 # Database setup
 def setup_database():
     conn = sqlite3.connect('markov_data.db')
@@ -63,7 +66,10 @@ def save_to_database(chat_id, word_pairs):
 def build_markov_model(chat_id):
     conn = sqlite3.connect('markov_data.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT word1, word2, next_word FROM markov_data WHERE chat_id = ?', (chat_id,))
+    if chat_id is None:
+        cursor.execute('SELECT word1, word2, next_word FROM markov_data')
+    else:
+        cursor.execute('SELECT word1, word2, next_word FROM markov_data WHERE chat_id = ?', (chat_id,))
     data = cursor.fetchall()
     conn.close()
 
@@ -87,8 +93,11 @@ def build_markov_model(chat_id):
 
     return transitions, starting_states
 
-# Updated function to generate a message to support 1st order
-def generate_message(chat_id, max_length=20):
+# Updated function to generate a message to optionally use all chats' data
+def generate_message(chat_id, max_length=20, use_all_chats=False):
+    if use_all_chats:
+        chat_id = None  # Use None to indicate all chats
+
     transitions, starting_states = build_markov_model(chat_id)
 
     if not starting_states:
@@ -174,10 +183,16 @@ async def send_random_message(context: ContextTypes.DEFAULT_TYPE):
     message = generate_message(chat_id)
     await context.bot.send_message(chat_id=chat_id, text=message)
 
-# Add a command to request a new message
+# Updated request_message command to restrict to the bot owner's DM
 async def request_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    message = generate_message(chat_id)
+    is_dm = update.message.chat.type == 'private'
+
+    if not is_dm or update.message.from_user.id != BOT_OWNER_ID:
+        await update.message.reply_text("This command is restricted to the bot owner's DM chat.")
+        return
+
+    message = generate_message(chat_id, use_all_chats=True)
     await update.message.reply_text(message)
 
 # Add bot command descriptions
