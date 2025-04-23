@@ -5,3 +5,4 @@
 venv/
 
 markov_data.db
+markov_data_backup.db
