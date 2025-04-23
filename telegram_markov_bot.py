@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # Add a debug log to confirm the bot is running
 logger.debug("Bot is running and ready to process messages.")
 
+# Add a new environment variable to control Markov order
+MARKOV_ORDER = int(os.getenv('MARKOV_ORDER', 2))
+
 # Database setup
 def setup_database():
     conn = sqlite3.connect('markov_data.db')
@@ -56,7 +59,7 @@ def save_to_database(chat_id, word_pairs):
     finally:
         conn.close()
 
-# Updated function to build the Markov model
+# Updated function to build the Markov model to support 1st order
 def build_markov_model(chat_id):
     conn = sqlite3.connect('markov_data.db')
     cursor = conn.cursor()
@@ -71,37 +74,64 @@ def build_markov_model(chat_id):
     starting_states = []
 
     for word1, word2, next_word in data:
-        if word1 == '<START>':
-            starting_states.append((word1, word2))
-        transitions[(word1, word2)][next_word] += 1
+        if MARKOV_ORDER == 1:
+            # Treat word2 as the next word for 1st order
+            if word1 == '<START>':
+                starting_states.append(word2)
+            transitions[word1][word2] += 1
+        else:
+            # Default 2nd order behavior
+            if word1 == '<START>':
+                starting_states.append((word1, word2))
+            transitions[(word1, word2)][next_word] += 1
 
     return transitions, starting_states
 
-# Updated function to generate a message
+# Updated function to generate a message to support 1st order
 def generate_message(chat_id, max_length=20):
     transitions, starting_states = build_markov_model(chat_id)
 
     if not starting_states:
         return "I don't have enough data to generate a message yet!"
 
-    current_state = random.choice(starting_states)
-    message = [current_state[1]]
+    if MARKOV_ORDER == 1:
+        current_state = random.choice(starting_states)
+        message = [current_state]
 
-    while len(message) < max_length:
-        next_words = transitions[current_state]
-        if not next_words:
-            break
+        while len(message) < max_length:
+            next_words = transitions[current_state]
+            if not next_words:
+                break
 
-        words, counts = zip(*next_words.items())
-        total = sum(counts)
-        probabilities = [count / total for count in counts]
-        next_word = random.choices(words, weights=probabilities, k=1)[0]
+            words, counts = zip(*next_words.items())
+            total = sum(counts)
+            probabilities = [count / total for count in counts]
+            next_word = random.choices(words, weights=probabilities, k=1)[0]
 
-        if next_word == '<END>':
-            break
+            if next_word == '<END>':
+                break
 
-        message.append(next_word)
-        current_state = (current_state[1], next_word)
+            message.append(next_word)
+            current_state = next_word
+    else:
+        current_state = random.choice(starting_states)
+        message = [current_state[1]]
+
+        while len(message) < max_length:
+            next_words = transitions[current_state]
+            if not next_words:
+                break
+
+            words, counts = zip(*next_words.items())
+            total = sum(counts)
+            probabilities = [count / total for count in counts]
+            next_word = random.choices(words, weights=probabilities, k=1)[0]
+
+            if next_word == '<END>':
+                break
+
+            message.append(next_word)
+            current_state = (current_state[1], next_word)
 
     generated_message = ' '.join(message)
     logger.info(f"Generated message: {generated_message}")
