@@ -94,13 +94,6 @@ def word_exists_in_db(chat_id, word):
         logger.error(f"Error checking word existence: {e}")
         return False
 
-# NEW: Function to check if any word from a list exists in the database
-def any_word_exists_in_db(chat_id, words):
-    for word in words:
-        if word and len(word) > 2 and word_exists_in_db(chat_id, word):
-            return True
-    return False
-
 # Get random words from the database for a specific chat
 def get_random_word_from_db(chat_id):
     try:
@@ -338,14 +331,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message)
         last_bot_message_times[chat_id] = time.time()
     
-    # Random chance to reply to a message, but only if at least one word exists in the database
-    elif random.random() < RANDOM_REPLY_CHANCE and any_word_exists_in_db(chat_id, words):
+    # Random chance to reply to a message
+    elif random.random() < RANDOM_REPLY_CHANCE:
         logger.info(f"Randomly decided to reply in chat {chat_id}")
         
-        # Always try to use a word from user's message for random replies
+        # MODIFIED: Always try to use a word from user's message for random replies
         valid_start_word = get_starting_word_from_message(words, chat_id, force_use_word=True)
         
-        # Since we already checked that at least one word exists, valid_start_word should not be None
+        # Generate message with the starting word if found, otherwise normal generation
         message = generate_message(chat_id, starting_word=valid_start_word)
         await update.message.reply_text(message)
         last_bot_message_times[chat_id] = time.time()
