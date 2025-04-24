@@ -31,9 +31,12 @@ MARKOV_ORDER = int(os.getenv('MARKOV_ORDER', 2))
 BOT_OWNER_ID = int(os.getenv('BOT_OWNER_ID', '0'))
 
 # Configuration for random replies and inactivity detection
-RANDOM_REPLY_CHANCE = float(os.getenv('RANDOM_REPLY_CHANCE', '0.05'))  # 5% chance to reply randomly
+RANDOM_REPLY_CHANCE = float(os.getenv('RANDOM_REPLY_CHANCE', '0.01'))  # 1% chance to reply randomly
 INACTIVITY_CHECK_INTERVAL = int(os.getenv('INACTIVITY_CHECK_INTERVAL', '3600'))  # Check every hour
 INACTIVITY_THRESHOLD = int(os.getenv('INACTIVITY_THRESHOLD', '86400'))  # 24 hours of inactivity
+
+# NEW: Control chance of using a word from user's message (for bot mentions and replies)
+WORD_FROM_USER_CHANCE = float(os.getenv('WORD_FROM_USER_CHANCE', '0.6'))  # 60% chance to use user's word
 
 # Store the last message timestamp for each chat
 last_message_times = {}
@@ -90,6 +93,13 @@ def word_exists_in_db(chat_id, word):
     except Exception as e:
         logger.error(f"Error checking word existence: {e}")
         return False
+
+# NEW: Function to check if any word from a list exists in the database
+def any_word_exists_in_db(chat_id, words):
+    for word in words:
+        if word and len(word) > 2 and word_exists_in_db(chat_id, word):
+            return True
+    return False
 
 # Get random words from the database for a specific chat
 def get_random_word_from_db(chat_id):
@@ -268,6 +278,26 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Hello! I am a Markov Chain Bot. Add me to a group and I will learn from the messages!')
 
+# Helper function to try to get a valid starting word from user message
+def get_starting_word_from_message(words, chat_id, force_use_word=False):
+    # Check if we should use a word from the user's message (unless forced)
+    if not force_use_word and random.random() > WORD_FROM_USER_CHANCE:
+        return None
+        
+    filtered_words = [w for w in words if w and len(w) > 2]  # Filter short words
+    
+    if not filtered_words:
+        return None
+        
+    # Shuffle words to select a random one
+    random.shuffle(filtered_words)
+    
+    for word in filtered_words:
+        if word_exists_in_db(chat_id, word):
+            return word
+            
+    return None
+
 # Enhanced message handler to respond to user messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -282,7 +312,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if the bot is mentioned using substring matching
     if any(keyword in text.lower() for keyword in ['marky', 'марки']):
         logger.info(f"Bot was mentioned in chat {chat_id}. Generating a response.")
-        message = generate_message(chat_id)
+        
+        # Try to get a starting word from the user's message based on probability
+        valid_start_word = get_starting_word_from_message(words, chat_id)
+        
+        message = generate_message(chat_id, starting_word=valid_start_word)
         await update.message.reply_text(message)
         last_bot_message_times[chat_id] = time.time()
 
@@ -296,41 +330,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id:
         logger.info(f"Message is a reply to the bot in chat {chat_id}. Generating a response.")
         
-        # Try to use a word from the user's message as a starting point
-        valid_start_word = None
-        filtered_words = [w for w in words if w and len(w) > 2]  # Filter short words
-        
-        # Shuffle words to select a random one
-        random.shuffle(filtered_words)
-        
-        for word in filtered_words:
-            if word_exists_in_db(chat_id, word):
-                valid_start_word = word
-                break
+        # Try to get a starting word from the user's message based on probability
+        valid_start_word = get_starting_word_from_message(words, chat_id)
         
         # Generate message with the starting word if found, otherwise normal generation
         message = generate_message(chat_id, starting_word=valid_start_word)
         await update.message.reply_text(message)
         last_bot_message_times[chat_id] = time.time()
     
-    # Random chance to reply to a message
-    elif random.random() < RANDOM_REPLY_CHANCE:
+    # Random chance to reply to a message, but only if at least one word exists in the database
+    elif random.random() < RANDOM_REPLY_CHANCE and any_word_exists_in_db(chat_id, words):
         logger.info(f"Randomly decided to reply in chat {chat_id}")
         
-        # Try to use a word from the user's message as a starting point
-        valid_start_word = None
-        filtered_words = [w for w in words if w and len(w) > 2]  # Filter short words
+        # Always try to use a word from user's message for random replies
+        valid_start_word = get_starting_word_from_message(words, chat_id, force_use_word=True)
         
-        if filtered_words:
-            # Shuffle words to select a random one
-            random.shuffle(filtered_words)
-            
-            for word in filtered_words:
-                if word_exists_in_db(chat_id, word):
-                    valid_start_word = word
-                    break
-        
-        # Generate message with the starting word if found, otherwise normal generation
+        # Since we already checked that at least one word exists, valid_start_word should not be None
         message = generate_message(chat_id, starting_word=valid_start_word)
         await update.message.reply_text(message)
         last_bot_message_times[chat_id] = time.time()
@@ -361,17 +376,26 @@ async def check_inactivity(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Failed to send inactivity message to chat {chat_id}: {e}")
 
-# Updated request_message command to restrict to the bot owner's DM
+# Updated request_message command to allow group chat usage with restrictions
 async def request_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
+    user_id = update.message.from_user.id
     is_dm = update.message.chat.type == 'private'
-
-    if not is_dm or update.message.from_user.id != BOT_OWNER_ID:
-        await update.message.reply_text("This command is restricted to the bot owner's DM chat.")
-        return
-
-    message = generate_message(chat_id, use_all_chats=True)
-    await update.message.reply_text(message)
+    is_owner = user_id == BOT_OWNER_ID
+    
+    # Default to using only the current chat's data
+    use_all_chats = False
+    
+    # If we're in the owner's DM, they can request to use all chats data
+    if is_dm and is_owner and context.args and context.args[0].lower() == 'all':
+        use_all_chats = True
+        
+    message = generate_message(chat_id, use_all_chats=use_all_chats)
+    
+    if use_all_chats:
+        await update.message.reply_text("Generating message from all chats data:\n\n" + message)
+    else:
+        await update.message.reply_text(message)
 
 # Add bot command descriptions
 def set_bot_commands(application):
