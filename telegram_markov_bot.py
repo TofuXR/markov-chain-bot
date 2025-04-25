@@ -3,6 +3,8 @@ import random
 import sqlite3
 import os
 import time
+from datetime import datetime
+import pytz
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -13,12 +15,17 @@ import string
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
+# Set timezone to Tokyo
+TIMEZONE = pytz.timezone('Asia/Tokyo')
+
 # Update logging level based on environment variable
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=getattr(logging, LOG_LEVEL, logging.INFO)
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    datefmt='%Y-%m-%d %H:%M:%S %Z'
 )
+logging.Formatter.converter = lambda *args: datetime.now(TIMEZONE).timetuple()
 logger = logging.getLogger(__name__)
 
 # Add a debug log to confirm the bot is running
@@ -59,11 +66,12 @@ def save_to_database(chat_id, word_pairs):
     try:
         conn = sqlite3.connect('markov_data.db')
         cursor = conn.cursor()
+        current_time = datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
         for word1, word2, next_word in word_pairs:
             cursor.execute('''INSERT OR IGNORE INTO markov_data (chat_id, word1, word2, next_word, created_at, updated_at)
-                              VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)''', (chat_id, word1, word2, next_word))
-            cursor.execute('''UPDATE markov_data SET updated_at = CURRENT_TIMESTAMP
-                              WHERE chat_id = ? AND word1 = ? AND word2 = ? AND next_word = ?''', (chat_id, word1, word2, next_word))
+                              VALUES (?, ?, ?, ?, ?, ?)''', (chat_id, word1, word2, next_word, current_time, current_time))
+            cursor.execute('''UPDATE markov_data SET updated_at = ?
+                              WHERE chat_id = ? AND word1 = ? AND word2 = ? AND next_word = ?''', (current_time, chat_id, word1, word2, next_word))
         conn.commit()
     except sqlite3.DatabaseError as e:
         logger.error(f"Database error: {e}")
@@ -80,6 +88,7 @@ def word_exists_in_db(chat_id, word):
         
         # Check if the word exists as word1 or word2
         cursor.execute('''
+
             SELECT COUNT(*) FROM markov_data 
             WHERE chat_id = ? AND (word1 = ? OR word2 = ?)
         ''', (chat_id, word, word))
@@ -99,6 +108,7 @@ def get_random_word_from_db(chat_id):
         
         # Get a random word1 that's not a special token
         cursor.execute('''
+
             SELECT DISTINCT word1 FROM markov_data 
             WHERE chat_id = ? AND word1 NOT IN ('<START>', '<END>')
             ORDER BY RANDOM() LIMIT 1
