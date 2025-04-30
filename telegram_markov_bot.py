@@ -233,12 +233,11 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
             total = sum(counts)
             probabilities = [count / total for count in counts]
             
-            # If message is too long, increase probability of <END>
+            # Force ending if at max length
             if len(message) >= max_length and '<END>' in words:
-                end_idx = words.index('<END>')
-                probabilities[end_idx] = max(probabilities) * 2
-            
-            next_word = random.choices(words, weights=probabilities, k=1)[0]
+                next_word = '<END>'
+            else:
+                next_word = random.choices(words, weights=probabilities, k=1)[0]
 
             if next_word == '<END>':
                 reached_end = True
@@ -264,12 +263,11 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
             total = sum(counts)
             probabilities = [count / total for count in counts]
 
-            # If message is too long, increase probability of <END>
+            # Force ending if at max length
             if len(message) >= max_length and '<END>' in words:
-                end_idx = words.index('<END>')
-                probabilities[end_idx] = max(probabilities) * 2
-
-            next_word = random.choices(words, weights=probabilities, k=1)[0]
+                next_word = '<END>'
+            else:
+                next_word = random.choices(words, weights=probabilities, k=1)[0]
 
             if next_word == '<END>':
                 reached_end = True
