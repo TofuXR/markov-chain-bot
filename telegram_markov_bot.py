@@ -218,7 +218,9 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
 
     # Generate the rest of the message
     if MARKOV_ORDER == 1:
-        while len(message) < max_length:
+        # Modify loop for Markov Order 1
+        reached_end = False
+        while not reached_end:
             # Skip if current state is not in transitions or is a special token
             if current_state not in transitions or current_state in ['<START>', '<END>']:
                 break
@@ -231,21 +233,26 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
             total = sum(counts)
             probabilities = [count / total for count in counts]
             
-            # Force ending if at max length
-            if len(message) >= max_length - 1 and '<END>' in words:
-                next_word = '<END>'
-            else:
-                next_word = random.choices(words, weights=probabilities, k=1)[0]
+            # If message is too long, increase probability of <END>
+            if len(message) >= max_length and '<END>' in words:
+                end_idx = words.index('<END>')
+                probabilities[end_idx] = max(probabilities) * 2
+            
+            next_word = random.choices(words, weights=probabilities, k=1)[0]
 
             if next_word == '<END>':
+                reached_end = True
                 break
                 
             if next_word != '<START>':  # Make sure we don't add <START>
                 message.append(next_word)
                 
             current_state = next_word
+
     else:  # MARKOV_ORDER == 2
-        while len(message) < max_length:
+        # Modify loop for Markov Order 2
+        reached_end = False
+        while not reached_end:
             if current_state not in transitions:
                 break
                 
@@ -257,13 +264,15 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
             total = sum(counts)
             probabilities = [count / total for count in counts]
 
-            # Force ending if at max length
-            if len(message) >= max_length - 1 and '<END>' in words:
-                next_word = '<END>'
-            else:
-                next_word = random.choices(words, weights=probabilities, k=1)[0]
+            # If message is too long, increase probability of <END>
+            if len(message) >= max_length and '<END>' in words:
+                end_idx = words.index('<END>')
+                probabilities[end_idx] = max(probabilities) * 2
+
+            next_word = random.choices(words, weights=probabilities, k=1)[0]
 
             if next_word == '<END>':
+                reached_end = True
                 break
                 
             if next_word != '<START>':  # Make sure we don't add <START>
