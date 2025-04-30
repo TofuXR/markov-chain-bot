@@ -230,7 +230,12 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
             words, counts = zip(*next_words.items())
             total = sum(counts)
             probabilities = [count / total for count in counts]
-            next_word = random.choices(words, weights=probabilities, k=1)[0]
+            
+            # Force ending if at max length
+            if len(message) >= max_length - 1 and '<END>' in words:
+                next_word = '<END>'
+            else:
+                next_word = random.choices(words, weights=probabilities, k=1)[0]
 
             if next_word == '<END>':
                 break
@@ -251,7 +256,12 @@ def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=
             words, counts = zip(*next_words.items())
             total = sum(counts)
             probabilities = [count / total for count in counts]
-            next_word = random.choices(words, weights=probabilities, k=1)[0]
+
+            # Force ending if at max length
+            if len(message) >= max_length - 1 and '<END>' in words:
+                next_word = '<END>'
+            else:
+                next_word = random.choices(words, weights=probabilities, k=1)[0]
 
             if next_word == '<END>':
                 break
