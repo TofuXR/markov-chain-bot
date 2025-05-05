@@ -6,3 +6,8 @@ venv/
 
 markov_data.db
 markov_data_backup.db
+
+.*backup
+
+# Ignore files ending with .backup
+*.backup
