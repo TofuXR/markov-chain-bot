@@ -332,12 +332,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         word_pairs = [(words[i], words[i + 1], words[i + 2]) for i in range(len(words) - 2)]
         save_to_database(chat_id, word_pairs)
 
-    # Check if the bot should respond (either mentioned, replied to, or random chance)
+    # Check if the bot should respond
     should_respond = False
+    is_private_chat = update.message.chat.type == 'private'
     is_mention = any(keyword in text.lower() for keyword in ['marky', 'марки'])
     is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
     
-    if is_mention or is_reply:
+    if is_private_chat:
+        should_respond = True
+        logger.info(f"Bot is in a one-on-one chat with {chat_id}")
+    elif is_mention or is_reply:
         should_respond = True
         logger.info(f"Bot was {'mentioned' if is_mention else 'replied to'} in chat {chat_id}")
     elif random.random() < RANDOM_REPLY_CHANCE:
