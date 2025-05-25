@@ -7,417 +7,541 @@ from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from collections import defaultdict
 import string
 
-# Load environment variables
+# --- Environment & Configuration Loading ---
 load_dotenv()
+
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    logger_init = logging.getLogger(__name__) # Temporary logger for critical startup error
+    logger_init.error("BOT_TOKEN environment variable not set. Exiting.")
+    raise ValueError("BOT_TOKEN environment variable not set.")
 
-# Set timezone to Tokyo
-TIMEZONE = pytz.timezone('Asia/Tokyo')
+TIMEZONE_STR = os.getenv('TELEGRAM_BOT_TIMEZONE', 'Asia/Tokyo') # Allow configuring timezone
+TIMEZONE = pytz.timezone(TIMEZONE_STR)
 
-# Update logging level based on environment variable
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOG_LEVEL_STR = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
+
+MARKOV_ORDER = int(os.getenv('MARKOV_ORDER', 2))
+RANDOM_REPLY_CHANCE = float(os.getenv('RANDOM_REPLY_CHANCE', '0.01'))
+INACTIVITY_CHECK_INTERVAL = int(os.getenv('INACTIVITY_CHECK_INTERVAL', '3600'))
+INACTIVITY_THRESHOLD = int(os.getenv('INACTIVITY_THRESHOLD', '86400'))
+WORD_FROM_USER_CHANCE = float(os.getenv('WORD_FROM_USER_CHANCE', '0.6')) # Chance to use user's word for mentions/replies
+
+DATABASE_NAME = 'markov_data.db'
+MAX_GENERATED_MESSAGE_LENGTH = int(os.getenv('MAX_GENERATED_MESSAGE_LENGTH', 20))
+
+
+# --- Special Tokens ---
+START_TOKEN = '<START>'
+END_TOKEN = '<END>'
+
+# --- Logging Setup ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    level=LOG_LEVEL,
     datefmt='%Y-%m-%d %H:%M:%S %Z'
 )
 logging.Formatter.converter = lambda *args: datetime.now(TIMEZONE).timetuple()
 logger = logging.getLogger(__name__)
 
-# Add a debug log to confirm the bot is running
-logger.debug("Bot is running and ready to process messages.")
+logger.debug("Bot configuration loaded and logger initialized.")
+logger.info(f"Running with Markov Order: {MARKOV_ORDER}, Timezone: {TIMEZONE_STR}")
 
-# Add a new environment variable to control Markov order
-MARKOV_ORDER = int(os.getenv('MARKOV_ORDER', 2))
+# --- Global State ---
+# For simplicity, keeping these as global dictionaries.
+# For larger applications, consider using context.bot_data or a dedicated state management class.
+LAST_MESSAGE_TIMESTAMPS = defaultdict(float)  # chat_id -> timestamp
+LAST_BOT_MESSAGE_TIMESTAMPS = defaultdict(float)  # chat_id -> timestamp
 
-# Configuration for random replies and inactivity detection
-RANDOM_REPLY_CHANCE = float(os.getenv('RANDOM_REPLY_CHANCE', '0.01'))  # 1% chance to reply randomly
-INACTIVITY_CHECK_INTERVAL = int(os.getenv('INACTIVITY_CHECK_INTERVAL', '3600'))  # Check every hour
-INACTIVITY_THRESHOLD = int(os.getenv('INACTIVITY_THRESHOLD', '86400'))  # 24 hours of inactivity
 
-# NEW: Control chance of using a word from user's message (for bot mentions and replies)
-WORD_FROM_USER_CHANCE = float(os.getenv('WORD_FROM_USER_CHANCE', '0.6'))  # 60% chance to use user's word
+# --- Database Manager ---
+class DatabaseManager:
+    def __init__(self, db_name: str):
+        self.db_name = db_name
+        self._setup_database()
 
-# Store the last message timestamp for each chat
-last_message_times = {}
-last_bot_message_times = {}
+    def _get_connection(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_name)
 
-# Database setup
-def setup_database():
-    conn = sqlite3.connect('markov_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS markov_data (
-                        chat_id INTEGER,
-                        word1 TEXT,
-                        word2 TEXT,
-                        next_word TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (chat_id, word1, word2, next_word))''')
-    conn.commit()
-    conn.close()
+    def _setup_database(self):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f'''CREATE TABLE IF NOT EXISTS markov_data (
+                                     chat_id INTEGER,
+                                     word1 TEXT,
+                                     word2 TEXT,
+                                     next_word TEXT,
+                                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                     PRIMARY KEY (chat_id, word1, word2, next_word))''')
+                conn.commit()
+            logger.info(f"Database '{self.db_name}' setup complete.")
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error during database setup: {e}")
+            raise
 
-# Updated save_to_database function to handle database errors gracefully
-def save_to_database(chat_id, word_pairs):
-    try:
-        conn = sqlite3.connect('markov_data.db')
-        cursor = conn.cursor()
-        current_time = datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
-        for word1, word2, next_word in word_pairs:
-            cursor.execute('''INSERT OR IGNORE INTO markov_data (chat_id, word1, word2, next_word, created_at, updated_at)
-                              VALUES (?, ?, ?, ?, ?, ?)''', (chat_id, word1, word2, next_word, current_time, current_time))
-            cursor.execute('''UPDATE markov_data SET updated_at = ?
-                              WHERE chat_id = ? AND word1 = ? AND word2 = ? AND next_word = ?''', (current_time, chat_id, word1, word2, next_word))
-        conn.commit()
-    except sqlite3.DatabaseError as e:
-        logger.error(f"Database error: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error while saving: {e}")
-    finally:
-        conn.close()
+    def save_word_pairs(self, chat_id: int, word_pairs: list[tuple[str, str, str]]):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                current_time_str = datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
+                for word1, word2, next_word in word_pairs:
+                    cursor.execute(f'''INSERT OR IGNORE INTO markov_data
+                                         (chat_id, word1, word2, next_word, created_at, updated_at)
+                                         VALUES (?, ?, ?, ?, ?, ?)''',
+                                   (chat_id, word1, word2, next_word, current_time_str, current_time_str))
+                    cursor.execute(f'''UPDATE markov_data SET updated_at = ?
+                                         WHERE chat_id = ? AND word1 = ? AND word2 = ? AND next_word = ?''',
+                                   (current_time_str, chat_id, word1, word2, next_word))
+                conn.commit()
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Database error during save_word_pairs for chat_id {chat_id}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error during save_word_pairs for chat_id {chat_id}: {e}")
 
-# Check if a word exists in the database for a specific chat
-def word_exists_in_db(chat_id, word):
-    try:
-        conn = sqlite3.connect('markov_data.db')
-        cursor = conn.cursor()
+    def word_exists(self, chat_id: int, word: str) -> bool:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f'''SELECT COUNT(*) FROM markov_data
+                                     WHERE chat_id = ? AND (word1 = ? OR word2 = ?)''',
+                               (chat_id, word, word))
+                count = cursor.fetchone()[0]
+                return count > 0
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Database error checking word existence for chat_id {chat_id}, word '{word}': {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error checking word existence for chat_id {chat_id}, word '{word}': {e}")
+            return False
+
+    def get_random_db_word(self, chat_id: int) -> str | None:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f'''SELECT DISTINCT word1 FROM markov_data
+                                     WHERE chat_id = ? AND word1 NOT IN (?, ?)
+                                     ORDER BY RANDOM() LIMIT 1''',
+                               (chat_id, START_TOKEN, END_TOKEN))
+                result = cursor.fetchone()
+                return result[0] if result else None
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Database error getting random word for chat_id {chat_id}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error getting random word for chat_id {chat_id}: {e}")
+            return None
+
+    def fetch_markov_data(self, chat_id: int | None = None) -> list[tuple[str, str, str]]:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if chat_id is None: # For use_all_chats scenario
+                    cursor.execute('SELECT word1, word2, next_word FROM markov_data')
+                else:
+                    cursor.execute('SELECT word1, word2, next_word FROM markov_data WHERE chat_id = ?', (chat_id,))
+                return cursor.fetchall()
+        except sqlite3.DatabaseError as e:
+            logger.error(f"Database error fetching markov data for chat_id {chat_id}: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error fetching markov data for chat_id {chat_id}: {e}")
+            return []
+
+# --- Markov Chain Generator ---
+class MarkovChainGenerator:
+    def __init__(self, db_manager: DatabaseManager, markov_order: int):
+        self.db_manager = db_manager
+        self.markov_order = markov_order
+        self._is_fallback_call = False # Prevents recursion in generate
+
+    def _build_model(self, chat_id: int | None) -> tuple[defaultdict | None, list | None]:
+        data = self.db_manager.fetch_markov_data(chat_id)
+        if not data:
+            logger.debug(f"No data found in DB for chat_id {chat_id} to build model.")
+            return None, None
+
+        transitions = defaultdict(lambda: defaultdict(int))
+        raw_starting_states = []
+
+        for word1, word2, next_word_val in data:
+            if self.markov_order == 1:
+                if word1 == START_TOKEN:
+                    raw_starting_states.append(word2)
+                transitions[word1][word2] += 1
+            else:  # MARKOV_ORDER == 2 (or default)
+                state = (word1, word2)
+                if word1 == START_TOKEN:
+                    raw_starting_states.append(state)
+                transitions[state][next_word_val] += 1
         
-        # Check if the word exists as word1 or word2
-        cursor.execute('''
+        # Filter starting states to ensure they are valid beginnings of a message
+        starting_states = []
+        if self.markov_order == 1:
+            starting_states = [s for s in raw_starting_states if s not in [START_TOKEN, END_TOKEN]]
+        else: # MARKOV_ORDER == 2
+            starting_states = [s for s in raw_starting_states if s[1] not in [START_TOKEN, END_TOKEN]]
 
-            SELECT COUNT(*) FROM markov_data 
-            WHERE chat_id = ? AND (word1 = ? OR word2 = ?)
-        ''', (chat_id, word, word))
+        if not transitions: logger.debug(f"Transitions model is empty for chat_id {chat_id}.")
+        if not starting_states: logger.debug(f"No valid starting states found for chat_id {chat_id} after filtering.")
         
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count > 0
-    except Exception as e:
-        logger.error(f"Error checking word existence: {e}")
-        return False
+        return transitions, starting_states
 
-# Get random words from the database for a specific chat
-def get_random_word_from_db(chat_id):
-    try:
-        conn = sqlite3.connect('markov_data.db')
-        cursor = conn.cursor()
-        
-        # Get a random word1 that's not a special token
-        cursor.execute('''
+    def _get_initial_state_and_message(self, transitions: defaultdict, starting_states: list, starting_word: str | None) -> tuple[any, list[str]]:
+        message_parts = []
+        current_state = None
 
-            SELECT DISTINCT word1 FROM markov_data 
-            WHERE chat_id = ? AND word1 NOT IN ('<START>', '<END>')
-            ORDER BY RANDOM() LIMIT 1
-        ''', (chat_id,))
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return result[0]
-        return None
-    except Exception as e:
-        logger.error(f"Error getting random word: {e}")
-        return None
+        if not starting_states:
+            return None, []
 
-# Updated function to build the Markov model to support 1st order
-def build_markov_model(chat_id):
-    conn = sqlite3.connect('markov_data.db')
-    cursor = conn.cursor()
-    if chat_id is None:
-        cursor.execute('SELECT word1, word2, next_word FROM markov_data')
-    else:
-        cursor.execute('SELECT word1, word2, next_word FROM markov_data WHERE chat_id = ?', (chat_id,))
-    data = cursor.fetchall()
-    conn.close()
+        if self.markov_order == 1:
+            if starting_word and starting_word in transitions and starting_word not in [START_TOKEN, END_TOKEN]:
+                current_state = starting_word
+            else: # No valid starting_word provided or it's not in model, pick a random one
+                valid_random_starts = [s for s in starting_states if s in transitions] #Ensure state exists as a key
+                if valid_random_starts:
+                    current_state = random.choice(valid_random_starts)
+                else: # Fallback if filtered starting_states are not keys in transitions (edge case)
+                    fallback_keys = [key for key in transitions.keys() if key not in [START_TOKEN, END_TOKEN]]
+                    if fallback_keys: current_state = random.choice(fallback_keys)
 
-    if not data:
-        return None, None
+            if current_state: message_parts = [current_state]
 
-    transitions = defaultdict(lambda: defaultdict(int))
-    starting_states = []
-
-    for word1, word2, next_word in data:
-        if MARKOV_ORDER == 1:
-            # Treat word2 as the next word for 1st order
-            if word1 == '<START>':
-                starting_states.append(word2)
-            transitions[word1][word2] += 1
-        else:
-            # Default 2nd order behavior
-            if word1 == '<START>':
-                starting_states.append((word1, word2))
-            transitions[(word1, word2)][next_word] += 1
-
-    return transitions, starting_states
-
-# Enhanced message generation with optional starting word
-def generate_message(chat_id, max_length=20, use_all_chats=False, starting_word=None):
-    if use_all_chats:
-        chat_id = None  # Use None to indicate all chats
-
-    transitions, starting_states = build_markov_model(chat_id)
-
-    if not starting_states:
-        return "I don't have enough data to generate a message yet!"
-
-    # Initialize message list that we'll build up
-    message = []
-    
-    if MARKOV_ORDER == 1:
-        if starting_word and starting_word in transitions:
-            # Use the provided starting word if it exists in the model
-            current_state = starting_word
-            message = [current_state]
-        else:
-            # Fall back to random starting state, but exclude <START> token
-            state = random.choice(starting_states)
-            # Make sure we don't add <START> to the actual message
-            if state != '<START>':
-                current_state = state
-                message = [current_state]
-            else:
-                # If we somehow get <START>, find another state
-                for state_key in transitions.keys():
-                    if state_key != '<START>' and state_key != '<END>':
-                        current_state = state_key
-                        message = [current_state]
-                        break
-    else:  # MARKOV_ORDER == 2
-        if starting_word:
-            # Find a valid starting state involving the starting word
-            valid_states = [state for state in starting_states if state[1] == starting_word]
-            if valid_states:
-                current_state = random.choice(valid_states)
-                # Only add the real word, not the <START> token
-                message = [current_state[1]]
-            else:
-                # Find any state with starting_word as first element
-                found = False
-                for state in transitions.keys():
-                    if isinstance(state, tuple) and state[0] != '<START>' and state[0] == starting_word:
-                        current_state = state
-                        message = [state[0], state[1]]  # Add both words
-                        found = True
-                        break
-                
-                if not found:
-                    # Fall back to random starting state
-                    current_state = random.choice(starting_states)
-                    # Only add the second word, as the first is likely <START>
-                    message = [current_state[1]]
-        else:
-            # Default behavior without starting word
-            current_state = random.choice(starting_states)
-            # Only add the second word, as the first is likely <START>
-            message = [current_state[1]]
-
-    # Generate the rest of the message
-    if MARKOV_ORDER == 1:
-        # Modify loop for Markov Order 1
-        reached_end = False
-        while not reached_end:
-            # Skip if current state is not in transitions or is a special token
-            if current_state not in transitions or current_state in ['<START>', '<END>']:
-                break
-                
-            next_words = transitions[current_state]
-            if not next_words:
-                break
-
-            words, counts = zip(*next_words.items())
-            total = sum(counts)
-            probabilities = [count / total for count in counts]
+        else:  # MARKOV_ORDER == 2
+            if starting_word:
+                # Prefer states like (<START>, starting_word)
+                possible_initial_states = [s for s in starting_states if s[1] == starting_word and s in transitions]
+                if possible_initial_states:
+                    current_state = random.choice(possible_initial_states)
+                    message_parts = [current_state[1]]
+                else:
+                    # Fallback: (starting_word, some_other_word), not necessarily beginning of sentence
+                    alternative_states = [
+                        state_key for state_key in transitions.keys()
+                        if isinstance(state_key, tuple) and state_key[0] == starting_word and state_key[0] != START_TOKEN
+                    ]
+                    if alternative_states:
+                        current_state = random.choice(alternative_states)
+                        message_parts = [current_state[0], current_state[1]]
             
-            # Force ending if at max length
-            if len(message) >= max_length and '<END>' in words:
-                next_word = '<END>'
-            else:
-                next_word = random.choices(words, weights=probabilities, k=1)[0]
+            if not current_state: # Fallback to a random starting state if no starting_word or it yielded no state
+                valid_random_starts = [s for s in starting_states if s in transitions]
+                if valid_random_starts:
+                    current_state = random.choice(valid_random_starts)
+                    message_parts = [current_state[1]] # Add the actual first word
 
-            if next_word == '<END>':
-                reached_end = True
+        return current_state, message_parts
+
+    def _generate_next_word(self, transitions: defaultdict, current_state: any, current_message_len: int, max_len: int) -> str:
+        if current_state not in transitions or not transitions[current_state]:
+            return END_TOKEN
+
+        next_word_options = transitions[current_state]
+        words, counts = zip(*next_word_options.items())
+        
+        if current_message_len >= max_len and END_TOKEN in words:
+            return END_TOKEN
+        
+        # Filter out START_TOKEN from potential next words
+        valid_choices = []
+        valid_counts = []
+        for i, word in enumerate(words):
+            if word != START_TOKEN:
+                valid_choices.append(word)
+                valid_counts.append(counts[i])
+
+        if not valid_choices: # Only START_TOKEN was an option, or list became empty
+            return END_TOKEN
+        
+        probabilities = [count / sum(valid_counts) for count in valid_counts]
+        return random.choices(valid_choices, weights=probabilities, k=1)[0]
+
+    def generate(self, chat_id: int, max_length: int = MAX_GENERATED_MESSAGE_LENGTH, use_all_chats: bool = False, starting_word: str | None = None) -> str:
+        effective_chat_id = None if use_all_chats else chat_id
+        transitions, starting_states = self._build_model(effective_chat_id)
+
+        if not transitions or not starting_states:
+            logger.warning(f"Not enough data to build model for chat_id: {effective_chat_id}. Transitions: {bool(transitions)}, Starts: {bool(starting_states)}")
+            return "I don't have enough data to generate a message yet!"
+
+        current_state, message_parts = self._get_initial_state_and_message(transitions, starting_states, starting_word)
+
+        if not current_state or not message_parts:
+            logger.warning(f"Could not determine a valid initial state for chat_id: {effective_chat_id} with starting_word: '{starting_word}'.")
+            if starting_word and not self._is_fallback_call:
+                try:
+                    self._is_fallback_call = True
+                    return self.generate(chat_id, max_length, use_all_chats, None) # Try without starting word
+                finally:
+                    self._is_fallback_call = False
+            return "I'm having trouble starting a message right now!"
+        
+        # Main generation loop
+        # Ensure message_parts is not empty before loop if current_state was found but message_parts remains empty (should not happen with current _get_initial_state_and_message)
+        if not message_parts and current_state: 
+            logger.error("Internal inconsistency: current_state set but message_parts empty.")
+            return "An internal error occurred while starting the message."
+
+
+        for _ in range(max_length - len(message_parts)): # Iterate up to max_length
+            next_word = self._generate_next_word(transitions, current_state, len(message_parts), max_length)
+
+            if next_word == END_TOKEN:
                 break
-                
-            if next_word != '<START>':  # Make sure we don't add <START>
-                message.append(next_word)
-                
-            current_state = next_word
+            
+            message_parts.append(next_word)
 
-    else:  # MARKOV_ORDER == 2
-        # Modify loop for Markov Order 2
-        reached_end = False
-        while not reached_end:
-            if current_state not in transitions:
-                break
-                
-            next_words = transitions[current_state]
-            if not next_words:
-                break
+            if self.markov_order == 1:
+                current_state = next_word
+            else:  # MARKOV_ORDER == 2
+                if not isinstance(current_state, tuple) or len(current_state) != 2:
+                    logger.error(f"Invalid current_state for MARKOV_ORDER 2: {current_state}. Stopping generation.")
+                    break # Avoid error
+                current_state = (current_state[1], next_word)
+        
+        final_message_words = [word for word in message_parts if word not in [START_TOKEN, END_TOKEN]]
 
-            words, counts = zip(*next_words.items())
-            total = sum(counts)
-            probabilities = [count / total for count in counts]
+        if not final_message_words:
+            logger.info(f"Generated empty message for chat_id {effective_chat_id}. Retrying without starting_word if applicable.")
+            if starting_word and not self._is_fallback_call:
+                try:
+                    self._is_fallback_call = True
+                    return self.generate(chat_id, max_length, use_all_chats, None)
+                finally:
+                    self._is_fallback_call = False
+            return "I don't have enough data to generate a coherent message yet!"
+        
+        generated_text = ' '.join(final_message_words)
+        logger.info(f"Generated message for chat_id {effective_chat_id} (len: {len(final_message_words)}): '{generated_text}'")
+        return generated_text
 
-            # Force ending if at max length
-            if len(message) >= max_length and '<END>' in words:
-                next_word = '<END>'
-            else:
-                next_word = random.choices(words, weights=probabilities, k=1)[0]
+# --- Helper Functions ---
+def preprocess_text(text: str) -> list[str]:
+    words = text.lower().split()
+    processed_words = []
+    for word in words:
+        stripped_word = word.strip(string.punctuation)
+        if stripped_word: # Avoid empty strings if word was only punctuation
+            processed_words.append(stripped_word)
+    return processed_words
 
-            if next_word == '<END>':
-                reached_end = True
-                break
-                
-            if next_word != '<START>':  # Make sure we don't add <START>
-                message.append(next_word)
-                
-            current_state = (current_state[1], next_word)
-
-    # Filter out any <START> tokens that might have slipped through
-    message = [word for word in message if word != '<START>' and word != '<END>']
-    
-    if not message:
-        # If somehow we ended up with an empty message, try again without a starting word
-        if starting_word:
-            return generate_message(chat_id, max_length, use_all_chats, None)
-        return "I don't have enough data to generate a coherent message yet!"
-
-    generated_message = ' '.join(message)
-    logger.info(f"Generated message: {generated_message}")
-    return generated_message
-
-# Command to start the bot
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Hello! I am a Markov Chain Bot. Add me to a group and I will learn from the messages!')
-
-# Helper function to try to get a valid starting word from user message
-def get_starting_word_from_message(words, chat_id, force_use_word=False):
-    # Check if we should use a word from the user's message (unless forced)
-    if not force_use_word and random.random() > WORD_FROM_USER_CHANCE:
+def determine_starting_word(
+    processed_text_words: list[str], 
+    chat_id: int, 
+    db_manager: DatabaseManager, 
+    force_attempt_user_word: bool = False
+) -> str | None:
+    """
+    Determines a starting word from the user's message.
+    - If force_attempt_user_word is True: Always try to pick a word from user's message if possible.
+    - If force_attempt_user_word is False: Use WORD_FROM_USER_CHANCE to decide whether to pick from user's message.
+    """
+    if not force_attempt_user_word and random.random() > WORD_FROM_USER_CHANCE:
+        logger.debug("Skipping user word for starting_word based on WORD_FROM_USER_CHANCE.")
         return None
         
-    filtered_words = [w for w in words if w and len(w) > 2]  # Filter short words
-    
-    if not filtered_words:
+    eligible_words = [w for w in processed_text_words if len(w) > 2] # Filter short words
+    if not eligible_words:
+        logger.debug("No eligible words from user message to use as starting_word.")
         return None
         
-    # Shuffle words to select a random one
-    random.shuffle(filtered_words)
-    
-    for word in filtered_words:
-        if word_exists_in_db(chat_id, word):
+    random.shuffle(eligible_words)
+    for word in eligible_words:
+        if db_manager.word_exists(chat_id, word):
+            logger.debug(f"Using '{word}' from user message as starting_word.")
             return word
             
+    logger.debug("No word from user message found in DB for starting_word.")
     return None
 
-# Enhanced message handler to respond to user messages
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Telegram Bot Command Handlers ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Hello! I am a Markov Chain Bot. Add me to a group and I will learn from the messages!')
+
+async def request_message_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'markov_generator' not in context.application.bot_data:
+        logger.error("Markov generator not found in bot_data for /request command.")
+        await update.message.reply_text("Sorry, I'm not properly initialized to do that right now.")
+        return
+
+    markov_gen: MarkovChainGenerator = context.application.bot_data['markov_generator']
     chat_id = update.message.chat_id
-    text = update.message.text
-    words = [word.strip(string.punctuation).lower() for word in text.split()]
-
-    logger.info(f"Received message in chat {chat_id}: {text}")
-    
-    # Update the last message time for this chat
-    last_message_times[chat_id] = time.time()
-
-    # Save message data regardless of bot interaction
-    if text and len(words) >= 2:
-        words = ['<START>'] + words + ['<END>']
-        word_pairs = [(words[i], words[i + 1], words[i + 2]) for i in range(len(words) - 2)]
-        save_to_database(chat_id, word_pairs)
-
-    # Check if the bot should respond
-    should_respond = False
-    is_private_chat = update.message.chat.type == 'private'
-    is_mention = any(keyword in text.lower() for keyword in ['marky', 'марки'])
-    is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-    
-    if is_private_chat:
-        should_respond = True
-        logger.info(f"Bot is in a one-on-one chat with {chat_id}")
-    elif is_mention or is_reply:
-        should_respond = True
-        logger.info(f"Bot was {'mentioned' if is_mention else 'replied to'} in chat {chat_id}")
-    elif random.random() < RANDOM_REPLY_CHANCE:
-        should_respond = True
-        logger.info(f"Randomly decided to reply in chat {chat_id}")
-
-    if should_respond:
-        # Try to get a starting word from the user's message
-        # Force word usage for random replies, otherwise use probability
-        force_use_word = not (is_mention or is_reply)
-        valid_start_word = get_starting_word_from_message(words, chat_id, force_use_word=force_use_word)
-        
-        # Generate and send the message
-        message = generate_message(chat_id, starting_word=valid_start_word)
-        await update.message.reply_text(message)
-        last_bot_message_times[chat_id] = time.time()
-
-# Check for inactive chats and respond if needed
-async def check_inactivity(context: ContextTypes.DEFAULT_TYPE):
-    current_time = time.time()
-    
-    for chat_id, last_time in last_message_times.items():
-        # Skip if we've recently sent a message to this chat
-        if chat_id in last_bot_message_times and current_time - last_bot_message_times.get(chat_id, 0) < INACTIVITY_THRESHOLD / 2:
-            continue
-            
-        # If chat has been inactive for longer than the threshold
-        if current_time - last_time > INACTIVITY_THRESHOLD:
-            logger.info(f"Detected inactivity in chat {chat_id}. Sending a message.")
-            
-            # Generate a random message for the inactive chat
-            random_word = get_random_word_from_db(chat_id)
-            message = generate_message(chat_id, starting_word=random_word)
-            
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=message)
-                last_bot_message_times[chat_id] = current_time
-                
-                # Reset inactivity timer to avoid spamming
-                last_message_times[chat_id] = current_time
-            except Exception as e:
-                logger.error(f"Failed to send inactivity message to chat {chat_id}: {e}")
-
-# Simplified request_message command without admin features
-async def request_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    message = generate_message(chat_id)
+    message = markov_gen.generate(chat_id)
     await update.message.reply_text(message)
 
-# Add bot command descriptions
-def set_bot_commands(application):
+# --- Telegram Bot Message Handler ---
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return # Should be filtered by MessageHandler filters
+
+    if 'db_manager' not in context.application.bot_data or \
+       'markov_generator' not in context.application.bot_data:
+        logger.error("db_manager or markov_generator not found in bot_data for handle_text_message.")
+        return
+
+    db_manager: DatabaseManager = context.application.bot_data['db_manager']
+    markov_generator: MarkovChainGenerator = context.application.bot_data['markov_generator']
+
+    chat_id = update.message.chat_id
+    user_text = update.message.text
+    
+    logger.info(f"Received message in chat {chat_id} from user {update.message.from_user.id if update.message.from_user else 'Unknown'}: '{user_text}'")
+    LAST_MESSAGE_TIMESTAMPS[chat_id] = time.time()
+
+    processed_words = preprocess_text(user_text)
+
+    # Save message data to database
+    # Original logic: need at least two words from user to form sequences for the DB.
+    if user_text and len(processed_words) >= 2:
+        db_words_to_store = [START_TOKEN] + processed_words + [END_TOKEN]
+        word_tuples_to_save = [
+            (db_words_to_store[i], db_words_to_store[i+1], db_words_to_store[i+2])
+            for i in range(len(db_words_to_store) - 2) # Ensures at least 3 elements for one tuple
+        ]
+        if word_tuples_to_save:
+            db_manager.save_word_pairs(chat_id, word_tuples_to_save)
+            logger.debug(f"Saved {len(word_tuples_to_save)} word pairs for chat_id {chat_id}.")
+        else:
+            logger.debug(f"Not enough words in '{user_text}' (processed: {processed_words}) to form word pairs for database.")
+    else:
+        logger.debug(f"Message '{user_text}' too short (processed: {processed_words}, len: {len(processed_words)}) to save to DB.")
+
+
+    # Determine if bot should respond
+    bot_is_mentioned = any(keyword in user_text.lower() for keyword in (context.bot.username.lower(), 'marky', 'марки'))
+    is_reply_to_bot = update.message.reply_to_message and \
+                      update.message.reply_to_message.from_user.id == context.bot.id
+    is_private_chat = update.message.chat.type == 'private'
+
+    should_respond = False
+    response_reason = ""
+
+    if is_private_chat:
+        should_respond = True
+        response_reason = "private chat"
+    elif bot_is_mentioned:
+        should_respond = True
+        response_reason = "bot mention"
+    elif is_reply_to_bot:
+        should_respond = True
+        response_reason = "reply to bot"
+    elif random.random() < RANDOM_REPLY_CHANCE:
+        should_respond = True
+        response_reason = "random chance"
+
+    if should_respond:
+        logger.info(f"Bot decided to respond in chat {chat_id} due to: {response_reason}.")
+        
+        # For random replies, we *force an attempt* to use a user word if available.
+        # For mentions/replies, we use WORD_FROM_USER_CHANCE.
+        force_attempt_user_word_for_reply = (response_reason == "random chance")
+        
+        start_word = determine_starting_word(
+            processed_words,
+            chat_id,
+            db_manager,
+            force_attempt_user_word=force_attempt_user_word_for_reply
+        )
+        
+        generated_message = markov_generator.generate(chat_id, starting_word=start_word)
+        await update.message.reply_text(generated_message)
+        LAST_BOT_MESSAGE_TIMESTAMPS[chat_id] = time.time()
+
+# --- Background Job ---
+async def check_inactivity_job(context: ContextTypes.DEFAULT_TYPE):
+    if 'db_manager' not in context.application.bot_data or \
+       'markov_generator' not in context.application.bot_data:
+        logger.error("db_manager or markov_generator not found in bot_data for inactivity job.")
+        return
+
+    db_m: DatabaseManager = context.application.bot_data['db_manager']
+    markov_gen: MarkovChainGenerator = context.application.bot_data['markov_generator']
+    
+    current_time = time.time()
+    # Iterate over a copy of items in case the dict is modified (less likely for defaultdict(float) but good practice)
+    for chat_id, last_msg_time in list(LAST_MESSAGE_TIMESTAMPS.items()):
+        # Skip if bot recently sent a message to this chat (e.g. within half the inactivity threshold)
+        if current_time - LAST_BOT_MESSAGE_TIMESTAMPS.get(chat_id, 0) < INACTIVITY_THRESHOLD / 2:
+            continue
+
+        if current_time - last_msg_time > INACTIVITY_THRESHOLD:
+            logger.info(f"Chat {chat_id} is inactive (last user msg: {datetime.fromtimestamp(last_msg_time, TIMEZONE).strftime('%Y-%m-%d %H:%M:%S %Z')}). Generating message.")
+            
+            random_start_word = db_m.get_random_db_word(chat_id)
+            message_to_send = markov_gen.generate(chat_id, starting_word=random_start_word)
+
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=message_to_send)
+                LAST_BOT_MESSAGE_TIMESTAMPS[chat_id] = current_time # Record bot's activity
+                LAST_MESSAGE_TIMESTAMPS[chat_id] = current_time # Reset user inactivity timer for this chat
+                logger.info(f"Sent inactivity message to chat {chat_id}.")
+            except Exception as e: # Catch broad exceptions from PTB or network issues
+                logger.error(f"Failed to send inactivity message to chat {chat_id}: {e}")
+                # Consider removing chat_id from LAST_MESSAGE_TIMESTAMPS if bot is blocked,
+                # or handle specific Telegram API errors (e.g., Forbidden).
+                # For now, just log and continue.
+
+# --- Bot Setup Function ---
+async def post_init_setup(application: Application):
+    """Set bot commands after application initialization."""
     commands = [
-        BotCommand("start", "Start the bot and get a welcome message"),
-        BotCommand("request", "Request a generated message from the bot")
+        BotCommand("start", "Start the bot and get a welcome message."),
+        BotCommand("request", "Request a generated message from the bot.")
     ]
-    application.bot.set_my_commands(commands, scope=None)  # Default scope for all users
+    try:
+        await application.bot.set_my_commands(commands)
+        logger.info("Bot commands successfully set.")
+    except Exception as e:
+        logger.error(f"Failed to set bot commands: {e}")
 
-# Main function to run the bot
+# --- Main Function ---
 def main():
-    setup_database()
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    logger.info("Starting bot...")
 
-    # set_bot_commands(application)
+    # Initialize core components
+    try:
+        db_manager = DatabaseManager(DATABASE_NAME)
+    except Exception as e: # Catch critical DB setup errors
+        logger.critical(f"Failed to initialize DatabaseManager: {e}. Bot cannot start.")
+        return
 
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('request', request_message))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    markov_generator = MarkovChainGenerator(db_manager, MARKOV_ORDER)
 
-    # Add the job to check for inactivity
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_inactivity, interval=INACTIVITY_CHECK_INTERVAL, first=INACTIVITY_CHECK_INTERVAL)
+    # Build the application
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init_setup).build()
 
-    # Log when the bot starts polling
+    # Store shared components in bot_data for access in handlers/jobs
+    application.bot_data['db_manager'] = db_manager
+    application.bot_data['markov_generator'] = markov_generator
+    
+    # Add handlers
+    application.add_handler(CommandHandler('start', start_command))
+    application.add_handler(CommandHandler('request', request_message_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
+    # Add job queue for inactivity check
+    if INACTIVITY_CHECK_INTERVAL > 0 and INACTIVITY_THRESHOLD > 0 :
+        job_queue = application.job_queue
+        job_queue.run_repeating(check_inactivity_job, interval=INACTIVITY_CHECK_INTERVAL, first=INACTIVITY_CHECK_INTERVAL)
+        logger.info(f"Inactivity check job scheduled every {INACTIVITY_CHECK_INTERVAL}s for chats inactive over {INACTIVITY_THRESHOLD}s.")
+    else:
+        logger.info("Inactivity check job is disabled due to zero interval or threshold.")
+
+
+    # Start polling
     logger.info("Bot has started polling for updates.")
-    application.run_polling()
-    logger.info("Bot has stopped polling.")
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.critical(f"Bot polling failed critically: {e}")
+    finally:
+        logger.info("Bot has stopped polling.")
 
 if __name__ == '__main__':
     main()
