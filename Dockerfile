@@ -14,13 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8080
 
 # Define environment variables
-ENV BOT_TOKEN=""
-ENV LOG_LEVEL="INFO"
-ENV MARKOV_ORDER="1"
-ENV RANDOM_REPLY_CHANCE="0.01"
-ENV INACTIVITY_CHECK_INTERVAL="3600"
-ENV INACTIVITY_THRESHOLD="86400"
-ENV WORD_FROM_USER_CHANCE="0.6"
+ENV TELEGRAM_BOT_TOKEN=""
 
 # Run the application
 CMD ["python", "telegram_markov_bot.py"]
