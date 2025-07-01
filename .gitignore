@@ -1,13 +1,8 @@
-# Ignore environment variable files
 .env
-
-# Ignore virtual environment folder
 venv/
-
 markov_data.db
 markov_data_backup.db
-
 .*backup
-
-# Ignore files ending with .backup
 *.backup
+*.log
+__pycache__
