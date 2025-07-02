@@ -94,7 +94,7 @@ def build_markov_model(db: Session, chat_id: int):
     return transitions, starting_states
 
 
-def generate_message(db: Session, chat_id: int, max_length=20, starting_word: str | None = None) -> str:
+def generate_message(db: Session, chat_id: int, max_length=30, starting_word: str | None = None) -> str:
     transitions, starting_states = build_markov_model(db, chat_id)
 
     if not starting_states:
@@ -102,6 +102,7 @@ def generate_message(db: Session, chat_id: int, max_length=20, starting_word: st
 
     message = []
     current_state = None
+    soft_length_limit = max_length * 0.5
 
     if config.MARKOV_ORDER == 1:
         if starting_word and starting_word in transitions:
@@ -122,13 +123,29 @@ def generate_message(db: Session, chat_id: int, max_length=20, starting_word: st
             current_state = random.choice(starting_states)
             message = [current_state[1]]
 
-    while current_state and len(message) < max_length:
+    while current_state and len(message) < max_length * 1.5:
         if current_state not in transitions:
             break
 
         next_words_map = transitions[current_state]
         words, counts = zip(*next_words_map.items())
-        next_word = random.choices(words, weights=counts, k=1)[0]
+
+        if len(message) > soft_length_limit and "<END>" in next_words_map:
+            new_counts = list(counts)
+            end_index = words.index("<END>")
+
+            length_penalty = (len(message) - soft_length_limit) / \
+                (max_length - soft_length_limit)
+            boost_factor = 1 + 4 * length_penalty
+            new_counts[end_index] = int(new_counts[end_index] * boost_factor)
+
+            if len(message) > max_length:
+                next_word = "<END>"
+            else:
+                next_word = random.choices(
+                    words, weights=new_counts, k=1)[0]
+        else:
+            next_word = random.choices(words, weights=counts, k=1)[0]
 
         if next_word == "<END>":
             break
