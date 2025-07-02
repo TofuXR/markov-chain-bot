@@ -11,10 +11,10 @@ COPY . /app
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Make port 8080 available to the world outside this container
-EXPOSE 8080
+EXPOSE 8081
 
 # Define environment variables
 ENV TELEGRAM_BOT_TOKEN=""
 
 # Run the application
-CMD ["python", "telegram_markov_bot.py"]
+CMD ["python", "app/telegram_markov_bot.py"]
