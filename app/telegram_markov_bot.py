@@ -52,7 +52,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    words = [word.strip(string.punctuation).lower() for word in text.split()]
+    words = [word.strip(string.punctuation).lower() for word in text.split() if word.strip(string.punctuation)]
     logger.info(f"Received message in chat {chat_id}: {text}")
 
     db = SessionLocal()
