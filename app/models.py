@@ -1,10 +1,23 @@
-from sqlalchemy import PrimaryKeyConstraint, func, Integer, String, DateTime
+from sqlalchemy import PrimaryKeyConstraint, func, Integer, String, DateTime, Float
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from datetime import datetime
 
 
 class Base(DeclarativeBase):
     pass
+
+
+class GroupSettings(Base):
+    __tablename__ = "group_settings"
+
+    chat_id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False)
+    markov_order: Mapped[int] = mapped_column(Integer, nullable=True)
+    random_reply_chance: Mapped[float] = mapped_column(Float, nullable=True)
+    word_from_user_chance: Mapped[float] = mapped_column(Float, nullable=True)
+
+    def __repr__(self):
+        return f"<GroupSettings(chat_id={self.chat_id})>"
 
 
 class MarkovData(Base):

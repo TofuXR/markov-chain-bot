@@ -17,7 +17,3 @@ def get_db():
         yield db
     finally:
         db.close()
-    try:
-        yield db
-    finally:
-        db.close()
