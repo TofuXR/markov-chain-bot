@@ -123,10 +123,10 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         random_reply_chance = settings.random_reply_chance if settings.random_reply_chance is not None else config.RANDOM_REPLY_CHANCE
         word_from_user_chance = settings.word_from_user_chance if settings.word_from_user_chance is not None else config.WORD_FROM_USER_CHANCE
 
-        message = "<b>Group Settings</b>\n"
-        message += f"MARKOV_ORDER: {markov_order}\n"
-        message += f"RANDOM_REPLY_CHANCE: {random_reply_chance}\n"
-        message += f"WORD_FROM_USER_CHANCE: {word_from_user_chance}\n"
+        message = "<b>My Boring Rules for This Chat</b>\n"
+        message += f"MARKOV_ORDER: {markov_order} (Whatever that means)\n"
+        message += f"RANDOM_REPLY_CHANCE: {random_reply_chance} (Don't expect too much)\n"
+        message += f"WORD_FROM_USER_CHANCE: {word_from_user_chance} (If I feel like it)\n"
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     finally:
         db.close()
@@ -219,7 +219,7 @@ async def feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total_words_learned += len(words)
                 lines_processed += 1
         
-        await update.message.reply_text(f"Thanks for the meal! I've learned {total_words_learned} words from {lines_processed} lines.")
+        await update.message.reply_text(f"Nom nom... Thanks for the meal, I guess. I learned {total_words_learned} words from {lines_processed} lines. Don't expect me to be grateful or anything!")
     finally:
         db.close()
 
