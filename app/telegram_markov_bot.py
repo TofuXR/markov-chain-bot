@@ -13,6 +13,7 @@ import database as database
 import markov as markov
 import crud as crud
 from database import SessionLocal
+import json
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -182,46 +183,118 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
+import json
+import ijson
+import tempfile
+
+# ... (other imports)
 
 async def feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        await update.message.reply_text("Hmph. Only admins can feed me. Don't get any funny ideas.")
+        return
+
     if not update.message.reply_to_message or not update.message.reply_to_message.document:
-        await update.message.reply_text("Please reply to a text file to feed it to me.")
+        await update.message.reply_text("Hmph. Reply to a file if you want me to learn something.")
         return
 
     document = update.message.reply_to_message.document
-    if document.file_size > config.MAX_FILE_SIZE_KB * 1024:
-        await update.message.reply_text(f"File is too large. Max size is {config.MAX_FILE_SIZE_KB}KB.")
-        return
+    is_json = document.file_name and document.file_name.lower().endswith('.json')
+    logger.info(f"Received file feed request: {document.file_name}")
+
+    if is_json:
+        if document.file_size > config.MAX_JSON_FILE_SIZE_MB * 1024 * 1024:
+            logger.warning(f"JSON file too large: {document.file_size} bytes")
+            await update.message.reply_text(f"That JSON is way too big, baka! The max size is {config.MAX_JSON_FILE_SIZE_MB}MB.")
+            return
+    else:
+        if document.file_size > config.MAX_FILE_SIZE_KB * 1024:
+            logger.warning(f"Text file too large: {document.file_size} bytes")
+            await update.message.reply_text(f"That file is way too big, baka! The max size is {config.MAX_FILE_SIZE_KB}KB.")
+            return
 
     file = await context.bot.get_file(document.file_id)
-    file_content = (await file.download_as_bytearray()).decode('utf-8')
-
-    lines = file_content.splitlines()
-
-    if not lines:
-        await update.message.reply_text("The file appears to be empty.")
-        return
-
+    
     chat_id = update.message.chat_id
     db = SessionLocal()
     total_words_learned = 0
     lines_processed = 0
-    try:
-        for line in lines:
-            words = [word.strip(string.punctuation).lower()
-                     for word in line.split() if word.strip(string.punctuation)]
+    word_pairs_batch = []
+    batch_size = 1000
 
+    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+        await file.download_to_drive(custom_path=temp_file.name)
+        temp_file_path = temp_file.name
+
+    try:
+        if is_json:
+            logger.info("Processing as JSON file.")
+            try:
+                with open(temp_file_path, 'rb') as f:
+                    messages = ijson.items(f, 'messages.item')
+                    for message in messages:
+                        text = message.get('text')
+                        if message.get('type') == 'message' and isinstance(text, str) and text:
+                            words = [word.strip(string.punctuation).lower() for word in text.split() if word.strip(string.punctuation)]
+                            if len(words) >= 1:
+                                word_sequence = ["<START>"] + words + ["<END>"]
+                                word_pairs_batch.extend([(word_sequence[i], word_sequence[i+1], word_sequence[i+2]) for i in range(len(word_sequence) - 2)])
+                                total_words_learned += len(words)
+                                lines_processed += 1
+
+                                if len(word_pairs_batch) >= batch_size:
+                                    markov.save_to_database(db, chat_id, word_pairs_batch)
+                                    word_pairs_batch.clear()
+                
+                if word_pairs_batch:
+                    markov.save_to_database(db, chat_id, word_pairs_batch)
+
+                if lines_processed > 0:
+                    logger.info(f"Learned {total_words_learned} words from {lines_processed} messages in JSON file.")
+                    await update.message.reply_text(f"Nom nom... I guess that chat history was okay. I learned {total_words_learned} words from {lines_processed} messages. Don't get used to it.")
+                else:
+                    logger.info("No valid messages found in JSON file.")
+                    await update.message.reply_text("Hmph. That JSON file didn't have any messages I could learn from.")
+                return
+            except (ijson.JSONError, UnicodeDecodeError) as e:
+                logger.error(f"Error processing JSON file: {e}", exc_info=True)
+                await update.message.reply_text("Hmph. That doesn't look like a proper Telegram export file. I'm not eating it.")
+                return
+        
+        # Processing for plain text files
+        logger.info("Processing as plain text file.")
+        with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+
+        if not lines:
+            logger.info("Text file is empty.")
+            await update.message.reply_text("This file is empty. Are you trying to starve me?")
+            return
+
+        for line in lines:
+            words = [word.strip(string.punctuation).lower() for word in line.split() if word.strip(string.punctuation)]
             if len(words) >= 1:
                 word_sequence = ["<START>"] + words + ["<END>"]
-                word_pairs = [(word_sequence[i], word_sequence[i + 1], word_sequence[i + 2])
-                              for i in range(len(word_sequence) - 2)]
-                markov.save_to_database(db, chat_id, word_pairs)
+                word_pairs_batch.extend([(word_sequence[i], word_sequence[i+1], word_sequence[i+2]) for i in range(len(word_sequence) - 2)])
                 total_words_learned += len(words)
                 lines_processed += 1
+
+                if len(word_pairs_batch) >= batch_size:
+                    markov.save_to_database(db, chat_id, word_pairs_batch)
+                    word_pairs_batch.clear()
+
+        if word_pairs_batch:
+            markov.save_to_database(db, chat_id, word_pairs_batch)
         
+        logger.info(f"Learned {total_words_learned} words from {lines_processed} lines in text file.")
         await update.message.reply_text(f"Nom nom... Thanks for the meal, I guess. I learned {total_words_learned} words from {lines_processed} lines. Don't expect me to be grateful or anything!")
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during file processing: {e}", exc_info=True)
+        await update.message.reply_text("Something went wrong while I was eating... I-it's not my fault, baka!")
     finally:
         db.close()
+        os.remove(temp_file_path)
 
 
 async def set_bot_commands(application):
