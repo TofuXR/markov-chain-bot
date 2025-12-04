@@ -187,8 +187,6 @@ import json
 import ijson
 import tempfile
 
-# ... (other imports)
-
 async def feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         await update.message.reply_text("Hmph. Only admins can feed me. Don't get any funny ideas.")
